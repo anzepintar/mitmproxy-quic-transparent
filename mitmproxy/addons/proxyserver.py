@@ -291,6 +291,11 @@ class Proxyserver(ServerManager):
             if any(isinstance(m, mode_specs.TransparentMode) for m in modes):
                 if platform.original_addr:
                     platform.init_transparent_mode()
+                    if not platform.transparent_udp_supported:
+                        logger.info(
+                            "Transparent mode intercepts TCP only on this platform; "
+                            "UDP-based protocols (QUIC/HTTP3) require Linux."
+                        )
                 else:
                     raise exceptions.OptionsError(
                         "Transparent mode not supported on this platform."

@@ -281,8 +281,10 @@ through mitmproxy.
 ## Transparent Proxy
 
 {{% note %}}
-Consider using [WireGuard](#wireguard) and [local capture](#local-capture) mode instead of transparent mode.
-They are easier to set up and also support UDP-based protocols (which transparent mode currently does not).
+On Linux, transparent mode intercepts both TCP and QUIC/HTTP-3 traffic (see the
+[transparent proxy how-to]({{< relref "/howto/transparent" >}})). On other platforms it is TCP-only;
+to intercept UDP-based protocols there, consider using [WireGuard](#wireguard) or
+[local capture](#local-capture) mode instead, which are also easier to set up.
 {{% /note %}}
 
 *Availability: Linux, macOS*

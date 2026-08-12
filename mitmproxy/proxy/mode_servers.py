@@ -43,6 +43,7 @@ from mitmproxy.proxy import commands
 from mitmproxy.proxy import layers
 from mitmproxy.proxy import mode_specs
 from mitmproxy.proxy import server
+from mitmproxy.proxy import udp_transparent
 from mitmproxy.proxy.context import Context
 from mitmproxy.proxy.layer import Layer
 from mitmproxy.utils import human
@@ -195,16 +196,23 @@ class ServerInstance(Generic[M], metaclass=ABCMeta):
         )
         handler.layer = self.make_top_layer(handler.layer.context)
         if isinstance(self.mode, mode_specs.TransparentMode):
-            assert isinstance(writer, asyncio.StreamWriter)
-            s = cast(socket.socket, writer.get_extra_info("socket"))
-            try:
-                assert platform.original_addr
-                original_dst = platform.original_addr(s)
-            except Exception as e:
-                logger.error(f"Transparent mode failure: {e!r}")
-                writer.close()
-                return
+            if isinstance(writer, asyncio.StreamWriter):
+                # TCP: recover the original destination via the platform resolver.
+                s = cast(socket.socket, writer.get_extra_info("socket"))
+                try:
+                    assert platform.original_addr
+                    original_dst = platform.original_addr(s)
+                except Exception as e:
+                    logger.error(f"Transparent mode failure: {e!r}")
+                    writer.close()
+                    return
+                else:
+                    handler.layer.context.client.sockname = original_dst
+                    handler.layer.context.server.address = original_dst
             else:
+                # UDP (QUIC/HTTP3): the original destination was recovered per-datagram
+                # via TPROXY, see `mitmproxy.proxy.udp_transparent`.
+                original_dst = writer.get_extra_info("original_dst")
                 handler.layer.context.client.sockname = original_dst
                 handler.layer.context.server.address = original_dst
         elif isinstance(
@@ -481,8 +489,47 @@ class UpstreamInstance(AsyncioServerInstance[mode_specs.UpstreamMode]):
 
 
 class TransparentInstance(AsyncioServerInstance[mode_specs.TransparentMode]):
+    # Transparent mode's base transport is TCP; on Linux we additionally intercept
+    # UDP-based protocols (QUIC/HTTP3) via TPROXY, see `mitmproxy.proxy.udp_transparent`.
+    _udp_servers: list[udp_transparent.TransparentUdpServer]
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._udp_servers = []
+        super().__init__(*args, **kwargs)
+
     def make_top_layer(self, context: Context) -> Layer:
         return layers.modes.TransparentProxy(context)
+
+    @property
+    def listen_addrs(self) -> tuple[Address, ...]:
+        udp_addrs = tuple(s.getsockname() for s in self._udp_servers)
+        return super().listen_addrs + udp_addrs
+
+    async def _start(self) -> None:
+        await super()._start()
+        if platform.transparent_udp_supported:
+            host = self.mode.listen_host(ctx.options.listen_host)
+            # Bind UDP to the same port the TCP listener actually received (handles port 0).
+            port = self.mode.listen_port(ctx.options.listen_port)
+            for s in self._servers:
+                if isinstance(s, asyncio.Server) and s.sockets:
+                    port = s.sockets[0].getsockname()[1]
+                    break
+            assert port is not None
+            try:
+                self._udp_servers = udp_transparent.start(
+                    host, port, self.handle_stream
+                )
+            except OSError as e:
+                logger.warning(
+                    f"Failed to start transparent UDP (QUIC) interception: {e}"
+                )
+
+    async def _stop(self) -> None:
+        for s in self._udp_servers:
+            s.close()
+        self._udp_servers = []
+        await super()._stop()
 
 
 class ReverseInstance(AsyncioServerInstance[mode_specs.ReverseMode]):

@@ -7,6 +7,9 @@
 
 ## Unreleased: mitmproxy next
 
+- Transparent mode now intercepts QUIC/HTTP-3 on Linux. UDP traffic redirected with TPROXY
+  (`IP_TRANSPARENT` + `IP_RECVORIGDSTADDR`) is decrypted using mitmproxy's existing QUIC stack and
+  certificate authority, mirroring how TCP transparent mode recovers the original destination.
 - Replace deprecated pyparsing APIs with their snake_case equivalents to avoid
   `PyparsingDeprecationWarning` during command and flow-filter parsing.
   ([#8344](https://github.com/mitmproxy/mitmproxy/pull/8344), @Dnsayhey)

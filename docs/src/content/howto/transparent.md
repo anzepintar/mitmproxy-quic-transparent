@@ -119,6 +119,41 @@ This will redirect the packets from all users other than `mitmproxyuser` on the 
 sudo -u mitmproxyuser -H bash -c '$HOME/.local/bin/mitmproxy --mode transparent --showhost --set block_global=false'
 ```
 
+### Intercepting QUIC and HTTP/3
+
+HTTP/3 and other QUIC-based protocols run over UDP. Because UDP is not tracked by the netfilter
+`REDIRECT`/`SO_ORIGINAL_DST` mechanism used for TCP, mitmproxy intercepts them transparently using
+[TPROXY](https://docs.kernel.org/networking/tproxy.html), which preserves the original destination
+of each datagram. This is supported on **Linux only**.
+
+Follow steps **1** and **2** above, then add a routing rule and a TPROXY ruleset that diverts
+UDP port 443 to mitmproxy's transparent listener:
+
+```bash
+# Route TPROXY-marked packets to the local socket.
+ip rule add fwmark 1 lookup 100
+ip route add local 0.0.0.0/0 dev lo table 100
+ip -6 rule add fwmark 1 lookup 100
+ip -6 route add local ::/0 dev lo table 100
+
+# Divert QUIC (UDP/443) to mitmproxy on port 8080.
+iptables  -t mangle -A PREROUTING -i eth0 -p udp --dport 443 -j TPROXY --on-port 8080 --tproxy-mark 1
+ip6tables -t mangle -A PREROUTING -i eth0 -p udp --dport 443 -j TPROXY --on-port 8080 --tproxy-mark 1
+```
+
+Keep the TCP `REDIRECT` rules from step **3** as well, so that hosts which fall back from HTTP/3 to
+HTTPS-over-TCP are still intercepted.
+
+When you start mitmproxy in transparent mode on Linux, it automatically listens for both TCP and UDP
+on the transparent port &mdash; no extra options are required. mitmproxy forges the QUIC/HTTP-3 leaf
+certificate from its own CA, so the client only needs the mitmproxy certificate authority installed
+(step **5**). Clients that pin certificates will reject the forged certificate and cannot be
+intercepted.
+
+**Note:** mitmproxy needs the `CAP_NET_ADMIN` capability (e.g. run as root) to open the
+`IP_TRANSPARENT` sockets that TPROXY requires. The `--on-port` value must match mitmproxy's listen
+port (`8080` by default).
+
 ## OpenBSD
 
 ### 1. Enable IP forwarding.

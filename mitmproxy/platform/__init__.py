@@ -16,10 +16,17 @@ Get the original destination for the given socket.
 This function will be None if transparent mode is not supported.
 """
 
+transparent_udp_supported: bool = False
+"""
+Whether transparent mode can also intercept UDP-based protocols (QUIC/HTTP3).
+This currently requires Linux with TPROXY; on other platforms transparent mode is TCP-only.
+"""
+
 if re.match(r"linux(?:2)?", sys.platform):
     from . import linux
 
     original_addr = linux.original_addr
+    transparent_udp_supported = True
 elif sys.platform == "darwin" or sys.platform.startswith("freebsd"):
     from . import osx
 
@@ -37,4 +44,4 @@ elif sys.platform == "win32":
 else:
     original_addr = None
 
-__all__ = ["original_addr", "init_transparent_mode"]
+__all__ = ["original_addr", "init_transparent_mode", "transparent_udp_supported"]

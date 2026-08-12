@@ -9,9 +9,12 @@ import pytest
 
 from ...conftest import no_ipv6
 from ...conftest import skip_not_linux
+from .test_udp_transparent import loopback_listener
+from .test_udp_transparent import loopback_reply_socket
 import mitmproxy.platform
 import mitmproxy_rs
 from mitmproxy.addons.proxyserver import Proxyserver
+from mitmproxy.proxy import udp_transparent
 from mitmproxy.proxy.mode_servers import LocalRedirectorInstance
 from mitmproxy.proxy.mode_servers import ServerInstance
 from mitmproxy.proxy.mode_servers import TunInstance
@@ -167,6 +170,62 @@ async def test_transparent(failure, monkeypatch, caplog_async):
 
         await inst.stop()
         assert await caplog_async.await_log("stopped")
+
+
+@skip_not_linux
+async def test_transparent_udp(monkeypatch, caplog_async):
+    caplog_async.set_level("INFO")
+    manager = MagicMock()
+
+    captured: dict = {}
+
+    async def _capture_and_echo(self: ConnectionHandler):
+        captured["server_address"] = self.layer.context.server.address
+        captured["transport"] = self.client.transport_protocol
+        captured["sockname"] = self.client.sockname
+        t = self.transports[self.client]
+        data = await t.reader.read(65535)
+        t.writer.write(data.upper())
+        await t.writer.drain()
+        t.writer.close()
+
+    monkeypatch.setattr(ConnectionHandler, "handle_client", _capture_and_echo)
+    monkeypatch.setattr(mitmproxy.platform, "transparent_udp_supported", True)
+    # Avoid requiring root/TPROXY: use loopback sockets without IP_TRANSPARENT.
+    monkeypatch.setattr(
+        udp_transparent.linux, "create_tproxy_listener", loopback_listener
+    )
+    monkeypatch.setattr(
+        udp_transparent.linux, "create_reply_socket", loopback_reply_socket
+    )
+
+    with taddons.context(Proxyserver()) as tctx:
+        tctx.options.connection_strategy = "lazy"
+        inst = ServerInstance.make("transparent@127.0.0.1:0", manager)
+        await inst.start()
+        await caplog_async.await_log("listening")
+
+        assert inst._udp_servers  # UDP (QUIC) interception is active on Linux
+        udp_addr = inst._udp_servers[0].getsockname()
+        assert udp_addr in inst.listen_addrs
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.bind(("127.0.0.1", 0))
+        client.setblocking(False)
+        client.sendto(b"ping", udp_addr)
+        loop = asyncio.get_running_loop()
+        reply = await asyncio.wait_for(loop.sock_recv(client, 65535), 5)
+
+        assert reply == b"PING"
+        # The original destination (recovered from the datagram) becomes server.address.
+        assert captured["transport"] == "udp"
+        assert captured["server_address"] == udp_addr
+        assert captured["sockname"] == udp_addr
+        client.close()
+
+        await inst.stop()
+        assert await caplog_async.await_log("stopped")
+        assert inst._udp_servers == []
 
 
 async def _echo_server(self: ConnectionHandler):
