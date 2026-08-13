@@ -7,6 +7,9 @@
 
 ## Unreleased: mitmproxy next
 
+- Fix HTTP/3 responses that carry a `Content-Length` but no body (responses to `HEAD`
+  requests, and `204`/`304` responses) being rejected with an `H3_MESSAGE_ERROR`
+  ("content-length does not match data size") and surfaced to the client as a `502`.
 - Transparent mode now intercepts QUIC/HTTP-3 on Linux. UDP traffic redirected with TPROXY
   (`IP_TRANSPARENT` + `IP_RECVORIGDSTADDR`) is decrypted using mitmproxy's existing QUIC stack and
   certificate authority, mirroring how TCP transparent mode recovers the original destination.

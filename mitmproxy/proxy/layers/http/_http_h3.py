@@ -307,6 +307,14 @@ class LayeredH3Connection(H3Connection):
         super().send_headers(stream_id, trailers, end_stream=True)
         self._after_send(stream_id, end_stream=True)
 
+    def _check_content_length(self, stream: H3Stream) -> None:
+        # aioquic enforces that a received body's size matches the response's Content-Length
+        # header. That wrongly rejects legitimately body-less responses which still carry a
+        # Content-Length: responses to HEAD requests, and 204/304 responses. As a relay,
+        # mitmproxy forwards bodies as framed and lets the endpoints validate, so we skip
+        # aioquic's check to avoid spurious errors (which otherwise surface to clients as 502).
+        pass
+
     def transmit(self) -> layer.CommandGenerator[None]:
         """Yields all pending commands for the upper QUIC layer."""
 

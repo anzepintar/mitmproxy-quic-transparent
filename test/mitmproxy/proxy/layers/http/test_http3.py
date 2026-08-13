@@ -476,6 +476,51 @@ def test_simple(tctx: context.Context):
     assert flow().response.text == "Hello, World!"
 
 
+def test_response_content_length_without_body(tctx: context.Context):
+    """A response that declares Content-Length but carries no body (the response to a HEAD
+    request, or a 204/304) must be relayed, not rejected. aioquic's content-length check
+    would otherwise raise and surface to the client as a 502; LayeredH3Connection skips it.
+    """
+    playbook, cff = start_h3_proxy(tctx)
+    flow = tutils.Placeholder(HTTPFlow)
+    server = tutils.Placeholder(connection.Server)
+    sff = FrameFactory(server, is_client=False)
+    # As for a HEAD response: Content-Length reflects the GET body, but no bytes follow.
+    response_headers = [(b":status", b"200"), (b"content-length", b"13")]
+    assert (
+        playbook
+        # request client
+        >> cff.receive_headers(example_request_headers, end_stream=True)
+        << (request := http.HttpRequestHeadersHook(flow))
+        << cff.send_decoder()  # for receive_headers
+        >> tutils.reply(to=request)
+        << http.HttpRequestHook(flow)
+        >> tutils.reply()
+        # request server
+        << commands.OpenConnection(server)
+        >> tutils.reply(None, side_effect=make_h3)
+        << sff.send_init()
+        << sff.send_headers(example_request_headers, end_stream=True)
+        >> sff.receive_init()
+        << sff.send_encoder()
+        >> sff.receive_encoder()
+        >> sff.receive_decoder()  # for send_headers
+        # response server: headers with content-length, then an empty, stream-ending body
+        >> sff.receive_headers(response_headers)
+        << (response := http.HttpResponseHeadersHook(flow))
+        << sff.send_decoder()  # for receive_headers
+        >> tutils.reply(to=response)
+        >> sff.receive_data(b"", end_stream=True)
+        << http.HttpResponseHook(flow)
+        >> tutils.reply()
+        # response client: headers carry end_stream, no separate (empty) body frame
+        << cff.send_headers(response_headers, end_stream=True)
+        >> cff.receive_decoder()  # for send_headers
+    )
+    assert cff.is_done and sff.is_done
+    assert flow().response.status_code == 200
+
+
 @pytest.mark.parametrize("stream", ["stream", ""])
 def test_response_trailers(
     tctx: context.Context,
