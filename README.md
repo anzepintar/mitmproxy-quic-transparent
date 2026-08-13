@@ -3,7 +3,7 @@
 
 ## Kaj je spremenjeno:
 
-Dodana podpora za QUIC transparent proxy.
+Dodana podpora za QUIC transparent proxy, za potrebe uporabe kot vmesni prestrezni strežnik v moji diplomski nalogi.
 
 
 
