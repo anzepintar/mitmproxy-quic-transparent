@@ -39,6 +39,11 @@ example_request_headers = [
 
 example_response_headers = [(b":status", b"200")]
 
+example_informational_response_headers = [
+    (b":status", b"103"),
+    (b"link", b"</style.css>; rel=preload"),
+]
+
 example_request_trailers = [(b"req-trailer-a", b"a"), (b"req-trailer-b", b"b")]
 
 example_response_trailers = [(b"resp-trailer-a", b"a"), (b"resp-trailer-b", b"b")]
@@ -1214,3 +1219,49 @@ def test_early_server_data(tctx: context.Context):
         >> tutils.reply(to=request)
         << sff.send_headers(example_request_headers, end_stream=True)
     )
+
+
+def test_informational_response(tctx: context.Context):
+    """A 1xx response is swallowed, and the response after it is not read as trailers."""
+
+    playbook, cff = start_h3_proxy(tctx)
+    flow = tutils.Placeholder(HTTPFlow)
+    server = tutils.Placeholder(connection.Server)
+    sff = FrameFactory(server, is_client=False)
+    assert (
+        playbook
+        # request client
+        >> cff.receive_headers(example_request_headers, end_stream=True)
+        << (request := http.HttpRequestHeadersHook(flow))
+        << cff.send_decoder()  # for receive_headers
+        >> tutils.reply(to=request)
+        << http.HttpRequestHook(flow)
+        >> tutils.reply()
+        # request server
+        << commands.OpenConnection(server)
+        >> tutils.reply(None, side_effect=make_h3)
+        << sff.send_init()
+        << sff.send_headers(example_request_headers, end_stream=True)
+        >> sff.receive_init()
+        << sff.send_encoder()
+        >> sff.receive_encoder()
+        >> sff.receive_decoder()  # for send_headers
+        # 1xx response server
+        >> sff.receive_headers(example_informational_response_headers)
+        << sff.send_decoder()  # for receive_headers
+        # response server
+        >> sff.receive_headers(example_response_headers)
+        << (response := http.HttpResponseHeadersHook(flow))
+        << sff.send_decoder()  # for receive_headers
+        >> tutils.reply(to=response)
+        >> sff.receive_data(b"Hello, World!", end_stream=True)
+        << http.HttpResponseHook(flow)
+        >> tutils.reply()
+        # response client
+        << cff.send_headers(example_response_headers)
+        << cff.send_data(b"Hello, World!")
+        << cff.send_data(b"", end_stream=True)
+        >> cff.receive_decoder()  # for send_headers
+    )
+    assert flow().response.status_code == 200
+    assert not flow().response.trailers

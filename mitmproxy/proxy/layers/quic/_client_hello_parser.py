@@ -29,6 +29,24 @@ class QuicClientHello(Exception):
     data: bytes
 
 
+def _invalid_packet(events: list[dict]) -> Optional[str]:
+    """
+    Look for a dropped packet among the events of a single datagram.
+
+    Padding that follows the last packet of a datagram is not a packet and a
+    receiver must ignore it (RFC 9000, section 12.2), but aioquic reports it as a
+    dropped header. Firefox pads this way, so a drop is only a real error when the
+    datagram yielded no packet at all.
+    """
+
+    for event in events:
+        if event["name"] == "transport:packet_received":
+            return None
+        if event["name"] == "transport:packet_dropped":
+            return event["data"]["trigger"]
+    return None
+
+
 def quic_parse_client_hello_from_datagrams(
     datagrams: list[bytes],
 ) -> Optional[ClientHello]:
@@ -85,9 +103,20 @@ def quic_parse_client_hello_from_datagrams(
             quic.tls._server_handle_hello = server_handle_hello_replacement  # type: ignore
 
     quic._initialize = initialize_replacement  # type: ignore
+    quic_logger = quic._configuration.quic_logger
+    assert isinstance(quic_logger, QuicLogger)
+    seen = 0
     try:
         for dgm in datagrams:
             quic.receive_datagram(dgm, ("0.0.0.0", 0), now=time.time())
+
+            traces = quic_logger.to_dict().get("traces")
+            assert isinstance(traces, list)
+            events = [event for trace in traces for event in trace.get("events")]
+            trigger = _invalid_packet(events[seen:])
+            seen = len(events)
+            if trigger is not None:
+                raise ValueError(f"Invalid ClientHello packet: {trigger}")
     except QuicClientHello as hello:
         try:
             return ClientHello(hello.data)
@@ -96,16 +125,4 @@ def quic_parse_client_hello_from_datagrams(
     except QuicConnectionError as e:
         raise ValueError(e.reason_phrase) from e
 
-    quic_logger = quic._configuration.quic_logger
-    assert isinstance(quic_logger, QuicLogger)
-    traces = quic_logger.to_dict().get("traces")
-    assert isinstance(traces, list)
-    for trace in traces:
-        quic_events = trace.get("events")
-        for event in quic_events:
-            if event["name"] == "transport:packet_dropped":
-                raise ValueError(
-                    f"Invalid ClientHello packet: {event['data']['trigger']}"
-                )
-
-    return None  # pragma: no cover  # FIXME: this should have test coverage
+    return None

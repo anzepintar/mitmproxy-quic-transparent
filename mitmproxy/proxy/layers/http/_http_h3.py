@@ -13,6 +13,7 @@ from aioquic.quic.events import StreamDataReceived
 from aioquic.quic.packet import QuicErrorCode
 
 from mitmproxy import connection
+from mitmproxy.net.http import status_codes
 from mitmproxy.proxy import commands
 from mitmproxy.proxy import layer
 from mitmproxy.proxy.layers.quic import CloseQuicConnection
@@ -110,6 +111,21 @@ class MockQuic:
         )
 
 
+def informational_status(headers: Headers) -> str | None:
+    """Describe the response as `status reason` if it is a 1xx response, else None."""
+
+    for key, value in headers:
+        if key == b":status":
+            try:
+                status = int(value)
+            except ValueError:
+                return None
+            if 100 <= status < 200:
+                return f"{status} {status_codes.RESPONSES.get(status, '')}".strip()
+            return None
+    return None
+
+
 class LayeredH3Connection(H3Connection):
     """
     Creates a H3 connection using a fake QUIC connection, which allows layer separation.
@@ -157,16 +173,32 @@ class LayeredH3Connection(H3Connection):
         events = super()._handle_request_or_push_frame(
             frame_type, frame_data, stream, stream_ended
         )
-        for index, event in enumerate(events):
-            if (
-                isinstance(event, HeadersReceived)
-                and self._stream[event.stream_id].headers_recv_state
-                == HeadersState.AFTER_TRAILERS
-            ):
-                events[index] = TrailersReceived(
-                    event.headers, event.stream_id, event.stream_ended
-                )
-        return events
+        result: list[H3Event] = []
+        for event in events:
+            if isinstance(event, HeadersReceived):
+                status = informational_status(event.headers)
+                if status is not None:
+                    # Swallow 1xx responses, just like HTTP/2 does. The stream goes back
+                    # to its initial state, because the final response that follows is a
+                    # response and not trailers.
+                    self._stream[event.stream_id].headers_recv_state = (
+                        HeadersState.INITIAL
+                    )
+                    self._mock.pending_commands.append(
+                        commands.Log(
+                            f"Swallowing HTTP/3 informational response: {status}"
+                        )
+                    )
+                    continue
+                if (
+                    self._stream[event.stream_id].headers_recv_state
+                    == HeadersState.AFTER_TRAILERS
+                ):
+                    event = TrailersReceived(
+                        event.headers, event.stream_id, event.stream_ended
+                    )
+            result.append(event)
+        return result
 
     def close_connection(
         self,
